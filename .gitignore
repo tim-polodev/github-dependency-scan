@@ -1,0 +1,11 @@
+# Kubernetes secret containing active credentials
+k8s/secret.yaml
+
+# Local built image tarballs and cache files
+image.tar
+__pycache__/
+*.pyc
+
+# IDE files
+.idea/
+.DS_Store

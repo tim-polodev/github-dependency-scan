@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dependency-check-config
+  namespace: dependency-check
+  labels:
+    app.kubernetes.io/name: dependency-check
+data:
+  # Configuration settings for your scans
+  # -------------------------------------
+  
+  # Set ONE of GITHUB_ORG, GITHUB_USER, or GITHUB_REPOS.
+  # GITHUB_ORG: Scan all repositories in this GitHub Organization.
+  GITHUB_ORG: ""
+  
+  # GITHUB_USER: Scan all public repositories for this GitHub User.
+  GITHUB_USER: "tim-polodev"
+  
+  # GITHUB_REPOS: Scan a comma-separated list of specific repositories in 'owner/repo' format.
+  # E.g., "tienhoangthanh/dependency-check,tienhoangthanh/another-repo"
+  GITHUB_REPOS: ""
+
+  # Vulnerability alerting threshold (LOW, MEDIUM, HIGH, CRITICAL).
+  SEVERITY_THRESHOLD: "HIGH"
+
+  # AWS region where your SNS Topic resides.
+  AWS_REGION: "ap-southeast-1"
+
+  # ARN of your pre-configured AWS SNS Topic (which sends email subscriptions).
+  AWS_SNS_TOPIC_ARN: "arn:aws:sns:ap-southeast-1:724772052990:DependencyCheckAlert"
