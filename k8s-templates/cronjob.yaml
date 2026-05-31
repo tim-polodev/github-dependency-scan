@@ -47,8 +47,8 @@ spec:
 
           containers:
             - name: scanner
-              # Private registry image running in the local cluster
-              image: 192.168.1.6:5000/dependency-scanner:latest
+              # Image location in the local or remote cluster registry
+              image: <YOUR_REGISTRY_IMAGE_PATH> # e.g. 192.168.1.6:5000/dependency-scanner:latest
               imagePullPolicy: Always
               
               securityContext:
@@ -56,7 +56,7 @@ spec:
                 readOnlyRootFilesystem: false # Needs write access to /app (temp files) and /data
                 capabilities:
                   drop:
-                    - ALL
+                     - ALL
 
               resources:
                 requests:

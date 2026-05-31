@@ -1,5 +1,5 @@
-# Kubernetes secret containing active credentials
-k8s/secret.yaml
+# Local active Kubernetes configuration directory
+k8s/
 
 # Local built image tarballs and cache files
 image.tar

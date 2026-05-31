@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dependency-check-config
+  namespace: dependency-check
+  labels:
+    app.kubernetes.io/name: dependency-check
+data:
+  # GitHub configuration
+  GITHUB_USER: "<YOUR_GITHUB_USER>" # e.g. tim-polodev
+  GITHUB_ORG: ""                     # Optional: Organization name to scan
+  GITHUB_REPOS: ""                   # Optional: Comma-separated list of repos (e.g. owner/repo1,owner/repo2)
+  
+  # AWS configuration for SNS alerts
+  AWS_REGION: "us-east-1"
+  AWS_SNS_TOPIC_ARN: "<YOUR_AWS_SNS_TOPIC_ARN>" # e.g. arn:aws:sns:us-east-1:123456789012:MyTopic
+  
+  # Vulnerability Scan threshold (HIGH or CRITICAL recommended)
+  SEVERITY_THRESHOLD: "HIGH"

@@ -3,13 +3,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: dependency-check-nvd-cache
   namespace: dependency-check
-  labels:
-    app.kubernetes.io/name: dependency-check
 spec:
+  storageClassName: manual
   accessModes:
     - ReadWriteOnce
-  # Explicitly set to empty string to bind to manual PersistentVolume (pv.yaml)
-  storageClassName: ""
   resources:
     requests:
-      storage: 5Gi
+      storage: 10Gi
