@@ -3,7 +3,7 @@ FROM eclipse-temurin:17-jre-focal
 # Prevent interactive prompts during installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install core utilities: Git, Python3, Pip, Curl, Unzip
+# Install core utilities: Git, Python3, Pip, Curl, Unzip, Nodejs, Npm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     python3 \
@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-setuptools \
     curl \
     unzip \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 # Download and install OWASP Dependency-Check CLI

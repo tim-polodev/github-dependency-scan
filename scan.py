@@ -189,6 +189,13 @@ def scan_repository(repo):
         report = parse_report(repo_name, report_data)
         if report:
             save_to_mongodb(report)
+            # Check for HIGH/CRITICAL issues to trigger auto-remediation
+            has_high_or_critical = any(
+                f.get("severity") in ["HIGH", "CRITICAL"] for f in report.get("findings", [])
+            )
+            if has_high_or_critical:
+                logger.info(f"[{repo_name}] HIGH/CRITICAL vulnerabilities found. Running auto-remediation...")
+                remediate_and_create_pr(repo, temp_dir, report)
         return report
         
     except subprocess.CalledProcessError as e:
@@ -296,6 +303,174 @@ def send_alert(results):
         logger.error(f"Failed to publish to AWS SNS: {e.response['Error']['Message']}")
     except Exception as e:
         logger.error(f"Unexpected error publishing to AWS SNS: {str(e)}")
+
+def remediate_and_create_pr(repo, temp_dir, report):
+    """Run auto-remediation inside temp_dir and create a Pull Request if changes are made."""
+    repo_name = repo['full_name']
+    default_branch = repo.get('default_branch', 'main')
+    
+    # 1. Run ecosystem-specific remediation tools
+    # Python Requirements Fix
+    req_file = os.path.join(temp_dir, "requirements.txt")
+    if os.path.exists(req_file):
+        logger.info(f"[{repo_name}] Found requirements.txt. Running pip-audit --fix...")
+        try:
+            # Run pip-audit to auto-remediate dependencies
+            subprocess.run(
+                [sys.executable, "-m", "pip_audit", "-r", "requirements.txt", "--fix"],
+                cwd=temp_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False
+            )
+        except Exception as e:
+            logger.error(f"[{repo_name}] Failed to run pip-audit: {str(e)}")
+            
+    # Node.js package.json Fix
+    package_file = os.path.join(temp_dir, "package.json")
+    if os.path.exists(package_file):
+        logger.info(f"[{repo_name}] Found package.json. Running npm audit fix...")
+        try:
+            # Run npm audit fix
+            subprocess.run(
+                ["npm", "audit", "fix"],
+                cwd=temp_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False
+            )
+        except Exception as e:
+            logger.error(f"[{repo_name}] Failed to run npm audit fix: {str(e)}")
+
+    # 2. Check if git status has any changes
+    try:
+        status_res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        if not status_res.stdout.strip():
+            logger.info(f"[{repo_name}] No files were modified during remediation. Skipping branch push and PR creation.")
+            return
+            
+        logger.info(f"[{repo_name}] Dependency changes detected. Preparing commit and pull request...")
+        
+        # Get last commit SHA before checkout and commit
+        last_commit_sha = None
+        try:
+            sha_res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            last_commit_sha = sha_res.stdout.strip()
+        except Exception as e:
+            logger.warning(f"[{repo_name}] Failed to get HEAD commit SHA: {str(e)}")
+            
+        # 3. Create a new branch and commit changes
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        branch_name = f"dependency-check/auto-remediations-{timestamp}"
+        
+        subprocess.run(["git", "config", "user.name", "Dependency-Check Bot"], cwd=temp_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "dependency-check-bot@users.noreply.github.com"], cwd=temp_dir, check=True)
+        
+        subprocess.run(["git", "checkout", "-b", branch_name], cwd=temp_dir, check=True)
+        subprocess.run(["git", "add", "."], cwd=temp_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "security: auto-remediate high/critical dependencies"], cwd=temp_dir, check=True)
+        
+        # 4. Push to remote
+        logger.info(f"[{repo_name}] Pushing branch {branch_name} to remote...")
+        subprocess.run(["git", "push", "origin", branch_name], cwd=temp_dir, check=True)
+        
+        # 5. Create Pull Request via GitHub API
+        headers = {
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28"
+        }
+        
+        # Build PR description body
+        findings_list = []
+        for finding in report.get("findings", []):
+            if finding.get("severity") in ["HIGH", "CRITICAL"]:
+                findings_list.append(
+                    f"- **{finding.get('cve')}** ({finding.get('severity')}): "
+                    f"`{finding.get('dependency')}` - {finding.get('description')}"
+                )
+        findings_body = "\n".join(findings_list)
+        
+        pr_body = (
+            f"This is an automated pull request to remediate HIGH/CRITICAL dependency vulnerabilities "
+            f"found during the daily dependency scan.\n\n"
+            f"### Discovered Vulnerabilities:\n{findings_body}\n\n"
+            f"### Remediation Actions Applied:\n"
+            f"- Checked for and applied ecosystem security updates (e.g. `pip-audit --fix` or `npm audit fix`).\n\n"
+            f"Please review and merge these changes."
+        )
+        
+        pr_payload = {
+            "title": "security: auto-remediate high/critical dependency vulnerabilities",
+            "head": branch_name,
+            "base": default_branch,
+            "body": pr_body
+        }
+        
+        pulls_url = f"https://api.github.com/repos/{repo_name}/pulls"
+        pr_res = requests.post(pulls_url, headers=headers, json=pr_payload)
+        
+        if pr_res.status_code != 201:
+            logger.error(f"[{repo_name}] Failed to create Pull Request: {pr_res.status_code} - {pr_res.text}")
+            return
+            
+        pr_data = pr_res.json()
+        pr_number = pr_data["number"]
+        pr_url = pr_data["html_url"]
+        logger.info(f"[{repo_name}] Created Pull Request #{pr_number} successfully: {pr_url}")
+        
+        # 6. Find the author of the last commit to request review and tag
+        author_username = None
+        if last_commit_sha:
+            try:
+                commit_url = f"https://api.github.com/repos/{repo_name}/commits/{last_commit_sha}"
+                commit_res = requests.get(commit_url, headers=headers)
+                if commit_res.status_code == 200:
+                    commit_data = commit_res.json()
+                    author_username = commit_data.get("author", {}).get("login")
+            except Exception as e:
+                logger.warning(f"[{repo_name}] Failed to resolve commit author login: {str(e)}")
+            
+        if not author_username:
+            # Fallback to repo owner
+            author_username = repo.get("owner", {}).get("login")
+            logger.info(f"[{repo_name}] Falling back to repo owner username: {author_username}")
+            
+        if author_username:
+            # A. Request reviewer assignment
+            reviewers_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/requested_reviewers"
+            reviewers_payload = {"reviewers": [author_username]}
+            rev_res = requests.post(reviewers_url, headers=headers, json=reviewers_payload)
+            if rev_res.status_code == 201:
+                logger.info(f"[{repo_name}] Assigned reviewer: {author_username}")
+            else:
+                logger.warning(f"[{repo_name}] Failed to assign reviewer {author_username}: {rev_res.status_code} - {rev_res.text}")
+                
+            # B. Add comment to tag the author
+            comments_url = f"https://api.github.com/repos/{repo_name}/issues/{pr_number}/comments"
+            comment_payload = {"body": f"Hey @{author_username}, please review this automated security remediation pull request."}
+            comment_res = requests.post(comments_url, headers=headers, json=comment_payload)
+            if comment_res.status_code == 201:
+                logger.info(f"[{repo_name}] Tagged author in comment.")
+            else:
+                logger.warning(f"[{repo_name}] Failed to add comment: {comment_res.status_code} - {comment_res.text}")
+                
+    except subprocess.CalledProcessError as e:
+        logger.error(f"[{repo_name}] Command failure during auto-remediation/push: {str(e)}")
+    except Exception as e:
+        logger.error(f"[{repo_name}] Unexpected error during remediation and PR creation: {str(e)}")
 
 def main():
     logger.info("Starting Daily OWASP Dependency-Check scan...")
