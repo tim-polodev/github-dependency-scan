@@ -1,0 +1,48 @@
+#!/bin/bash
+
+# Exit immediately if a command exits with a non-zero status
+set -e
+
+# ANSI escape codes for coloring terminal output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+echo -e "${CYAN}===============================================${NC}"
+echo -e "${CYAN}   Running Pre-Commit Verification Hooks       ${NC}"
+echo -e "${CYAN}===============================================${NC}"
+
+# 1. Gitleaks scan for secrets
+if command -v gitleaks &> /dev/null; then
+    echo -e "${CYAN}[1/2] Running Gitleaks Secrets Scan...${NC}"
+    if ! gitleaks protect --staged --verbose; then
+        echo -e "${RED}❌ Gitleaks scan failed. Potential secrets detected.${NC}"
+        echo -e "${RED}Please remove the sensitive information before committing.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Gitleaks scan passed.${NC}"
+else
+    echo -e "${YELLOW}⚠️ Gitleaks is not installed. Skipping secrets scan.${NC}"
+    echo -e "${YELLOW}   Install: brew install gitleaks (macOS) or visit https://github.com/gitleaks/gitleaks${NC}"
+fi
+
+# 2. Semgrep SAST scan
+if command -v semgrep &> /dev/null; then
+    echo -e "${CYAN}[2/2] Running Semgrep SAST Scan...${NC}"
+    if ! semgrep scan --config=auto --error; then
+        echo -e "${RED}❌ Semgrep scan failed. Security issues or errors detected.${NC}"
+        echo -e "${RED}Please resolve the findings before committing.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Semgrep scan passed.${NC}"
+else
+    echo -e "${YELLOW}⚠️ Semgrep is not installed. Skipping SAST scan.${NC}"
+    echo -e "${YELLOW}   Install: brew install semgrep or pip install semgrep${NC}"
+fi
+
+echo -e "${GREEN}===============================================${NC}"
+echo -e "${GREEN}   All pre-commit verification checks passed!  ${NC}"
+echo -e "${GREEN}===============================================${NC}"
+exit 0

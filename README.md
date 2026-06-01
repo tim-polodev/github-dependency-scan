@@ -162,3 +162,49 @@ The scanner will immediately detect the file deletion and resume scanning.
 ### Database Initialization
 * **First Run**: During the first execution, Dependency-Check will download and seed the entire NVD H2 database into the Persistent Volume. This takes about **5 to 15 minutes** depending on your bandwidth.
 * **Subsequent Runs**: Daily incremental updates typically complete in **under 2 minutes** per repository, making execution extremely fast.
+
+---
+
+## Pre-commit Security Scans (Git Hooks)
+
+To maintain codebase security and prevent secret leaks or vulnerability introductions, this repository includes automated pre-commit scanning powered by **Gitleaks** and **Semgrep**.
+
+These scans run automatically before every git commit when configured.
+
+### Prerequisites
+
+Ensure you have the required CLI tools installed on your development machine:
+
+```bash
+# macOS (using Homebrew)
+brew install gitleaks semgrep
+
+# Linux / Other platforms
+# Refer to official installation guides:
+# - Gitleaks: https://github.com/gitleaks/gitleaks
+# - Semgrep: https://github.com/semgrep/semgrep
+```
+
+### Setup Git Hooks
+
+Configure Git to use the local `.githooks` directory and make the scripts executable by running:
+
+```bash
+./setup-git-hooks.sh
+```
+
+Once executed, every time you run `git commit`, the hook will:
+1. Scan for hardcoded credentials (API keys, secrets, tokens) via `gitleaks protect --staged`.
+2. Analyze the code for security vulnerabilities via `semgrep scan --config=auto`.
+
+If any issues are found, the commit is blocked until they are resolved.
+
+### Alternative: Pre-Commit Framework
+
+If you prefer using the standard `pre-commit` Python package manager, a `.pre-commit-config.yaml` is also provided. You can initialize it by installing the tool and running:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
