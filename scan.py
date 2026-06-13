@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
+import io
 import json
 import shutil
 import logging
@@ -13,11 +14,20 @@ from botocore.exceptions import ClientError
 from pymongo import MongoClient
 
 # Configure Logging
+log_buffer = io.StringIO()
+log_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setFormatter(log_formatter)
+
+buffer_handler = logging.StreamHandler(log_buffer)
+buffer_handler.setFormatter(log_formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout)
+        stdout_handler,
+        buffer_handler
     ]
 )
 logger = logging.getLogger("dependency-scanner")
@@ -66,6 +76,7 @@ FIX_BREAKING_CHANGES = get_env_var("FIX_BREAKING_CHANGES", "false").lower() == "
 MONGO_URI = get_env_var("MONGO_URI")  # Optional: e.g., mongodb://host:27017
 MONGO_DB = get_env_var("MONGO_DB", "dependency_check")
 MONGO_COLLECTION = get_env_var("MONGO_COLLECTION", "scan_results")
+MONGO_LOGS_COLLECTION = get_env_var("MONGO_LOGS_COLLECTION", "execution_logs")
 
 # Severity weighting for comparison
 SEVERITY_WEIGHTS = {
@@ -161,6 +172,31 @@ def save_to_mongodb(result):
         logger.info(f"Scan report for {result['repo_name']} successfully saved to MongoDB.")
     except Exception as e:
         logger.error(f"Failed to save report to MongoDB for {result['repo_name']}: {str(e)}")
+
+def save_execution_logs(start_time, status):
+    """Save execution logs to MongoDB if MONGO_URI is configured."""
+    if not MONGO_URI:
+        return
+    
+    try:
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        db = client[MONGO_DB]
+        collection = db[MONGO_LOGS_COLLECTION]
+        
+        # Prepare document
+        doc = {
+            "job_id": f"job_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+            "start_time": start_time,
+            "end_time": datetime.datetime.utcnow().isoformat() + "Z",
+            "status": status,
+            "logs": log_buffer.getvalue()
+        }
+        
+        # Insert logs
+        collection.insert_one(doc)
+        print(f"Execution logs successfully saved to MongoDB (Collection: {MONGO_LOGS_COLLECTION}).")
+    except Exception as e:
+        print(f"Failed to save execution logs to MongoDB: {str(e)}", file=sys.stderr)
 
 def scan_repository(repo):
     """Clone, scan, and parse results of a repository."""
@@ -591,23 +627,38 @@ def remediate_and_create_pr(repo, temp_dir, report):
         logger.error(f"[{repo_name}] Unexpected error during remediation and PR creation: {str(e)}")
 
 def main():
+    start_time = datetime.datetime.utcnow().isoformat() + "Z"
+    status = "SUCCESS"
+    
     logger.info("Starting Daily OWASP Dependency-Check scan...")
     
     try:
-        repos = fetch_repositories()
-    except Exception as e:
-        logger.error(f"Initialization failure: {str(e)}")
-        sys.exit(1)
-        
-    results = []
-    for index, repo in enumerate(repos, 1):
-        logger.info(f"[{index}/{len(repos)}] Processing {repo['full_name']}...")
-        res = scan_repository(repo)
-        if res:
-            results.append(res)
+        try:
+            repos = fetch_repositories()
+        except Exception as e:
+            logger.error(f"Initialization failure: {str(e)}")
+            status = "FAILED"
+            sys.exit(1)
             
-    send_alert(results)
-    logger.info("Daily scanning job complete.")
+        results = []
+        for index, repo in enumerate(repos, 1):
+            logger.info(f"[{index}/{len(repos)}] Processing {repo['full_name']}...")
+            res = scan_repository(repo)
+            if res:
+                results.append(res)
+                
+        send_alert(results)
+        logger.info("Daily scanning job complete.")
+    except SystemExit as e:
+        if e.code != 0:
+            status = "FAILED"
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected execution failure: {str(e)}")
+        status = "FAILED"
+        raise
+    finally:
+        save_execution_logs(start_time, status)
 
 if __name__ == "__main__":
     main()

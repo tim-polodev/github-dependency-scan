@@ -148,6 +148,11 @@ spec:
                     configMapKeyRef:
                       name: dependency-check-config
                       key: FIX_BREAKING_CHANGES
+                - name: MONGO_LOGS_COLLECTION
+                  valueFrom:
+                    configMapKeyRef:
+                      name: dependency-check-config
+                      key: MONGO_LOGS_COLLECTION
                 
                 # Internal persistent data directory path
                 - name: DATA_DIR

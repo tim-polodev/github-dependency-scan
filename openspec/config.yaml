@@ -1,0 +1,49 @@
+schema: spec-driven
+
+# Project context
+# This is shown to AI when creating artifacts.
+context: |
+  Project: Daily Kubernetes OWASP Dependency-Check Scanner
+  
+  Tech Stack:
+    - Language/Runtime: Python 3 (supporting versions 3.8 to 3.12 dynamically via venv), Node.js (supporting versions via NVM, defaults to 20.11.1)
+    - Vulnerability Scanner: OWASP Dependency-Check (H2 database seeded in Persistent Volume)
+    - Storage: MongoDB (storing full reports in the 'scan_results' collection under 'dependency_check' DB)
+    - Alerts: AWS SNS (publishing aggregated markdown-like email digests for vulnerabilities above SEVERITY_THRESHOLD)
+    - Containerization: Docker (cross-architecture builds via docker buildx for linux/amd64)
+    - Orchestration: Kubernetes CronJob, Secrets, ConfigMaps, PV, PVC, initContainers (volume-permissions)
+    - Security & Linting: Gitleaks (secrets protection), Semgrep (SAST), pre-commit hooks
+  
+  Architectural Guidelines & Conventions:
+    - Deployment Safety:
+      * `k8s-templates/`: Clean, generic public template manifests. Checked into Git.
+      * `k8s/`: Active/live manifests with credentials and environment-specific settings. Globally ignored by Git (`.gitignore`).
+      * Rule: NEVER check in credentials, secrets, or files inside `k8s/` to git.
+    - Scanner & Remediation Behavior:
+      * Automated remediation executes `npm audit fix` or `pip-audit --fix` inside the correct matching runtime environments (via NVM or deadsnakes python binaries).
+      * Remediation upgrades are non-breaking by default. Breaking changes can be applied via `npm audit fix --force` only if `FIX_BREAKING_CHANGES="true"`.
+    - Storage and Lock Management:
+      * Persistent Volume holds seeded NVD database cache at `/data/dependency-check-nvd-cache/`.
+      * Mid-run terminations might leave a stale lock file at `/data/dependency-check-nvd-cache/odc.update.lock`. If found stale, delete it to allow resume.
+      * Cloned repos can be preserved in `/data/repos` if `PRESERVE_REPOS="true"` to speed up runs via `git fetch` and reset.
+    - Kubernetes Network Bypass:
+      * Calico CNI DNS issues are bypassed by configuring `dnsPolicy: None` and fallback nameservers (`8.8.8.8`, `1.1.1.1`) directly in the scanner pod.
+  
+  Coding Conventions:
+    - We use Conventional Commits for all git commits.
+    - Keep scripts documented, robust, and handle subprocess failures safely using capture logs.
+
+# Per-artifact rules
+# Add custom rules for specific artifacts.
+rules:
+  proposal:
+    - Always define target repositories, security goals, and dependencies affected.
+    - Explicitly state whether the change affects credentials, secret environment variables, or private config structures.
+    - Keep proposals concise, including a "Non-goals" section to limit scope creep.
+  design:
+    - For any configuration change, outline the exact Environment Variables, ConfigMap keys, or Secrets needed.
+    - When adding new CLI tools or runtime packages, ensure they are added to the Dockerfile and tested for non-root execution.
+    - Any Kubernetes manifest modifications must be specified for `k8s-templates/` first.
+  tasks:
+    - Break down tasks into small, self-contained units of work (max 2 hours per task).
+    - "Always include verification tasks: (1) Pre-commit security verification (Gitleaks/Semgrep check), (2) Docker image build validation, (3) Ad-hoc verification in Kubernetes using manual-job.yaml, and (4) Database archiving and alert/email verification."

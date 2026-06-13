@@ -23,3 +23,6 @@ data:
 
   # Vulnerability Scan threshold (HIGH or CRITICAL recommended)
   SEVERITY_THRESHOLD: "HIGH"
+
+  # MongoDB collection for storing execution logs
+  MONGO_LOGS_COLLECTION: "execution_logs"

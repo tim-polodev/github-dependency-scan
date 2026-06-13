@@ -1,0 +1,163 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dependency-scanner-manual
+  namespace: dependency-check
+  labels:
+    app.kubernetes.io/name: dependency-check
+spec:
+  # The job runs once and does not restart on successful completion
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dependency-check
+    spec:
+      # Bypass local cluster DNS forwarding issues by specifying public DNS servers directly
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers:
+          - 10.96.0.10
+          - 8.8.8.8
+          - 1.1.1.1
+        searches:
+          - dependency-check.svc.cluster.local
+          - svc.cluster.local
+          - cluster.local
+        options:
+          - name: ndots
+            value: "5"
+          - name: timeout
+            value: "2"
+          - name: attempts
+            value: "3"
+
+      # Set the group ID to allow writing to the mounted PVC volume
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+
+      restartPolicy: OnFailure
+
+      initContainers:
+        - name: volume-permissions
+          image: alpine
+          command: ["sh", "-c", "chown -R 1000:1000 /data"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: nvd-database-cache
+              mountPath: /data
+
+      containers:
+        - name: scanner
+          # Image location in the local or remote cluster registry
+          image: <YOUR_REGISTRY_IMAGE_PATH> # e.g. 192.168.1.6:5000/dependency-scanner:latest
+          imagePullPolicy: Always
+          
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false # Needs write access to /app (temp files) and /data
+            capabilities:
+              drop:
+                - ALL
+
+          resources:
+            requests:
+              memory: "1.5Gi"
+              cpu: "500m"
+            limits:
+              memory: "3Gi"
+              cpu: "2000m"
+
+          env:
+            # Sensitive values from Secret
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dependency-check-secrets
+                  key: GITHUB_TOKEN
+            - name: NVD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dependency-check-secrets
+                  key: NVD_API_KEY
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: dependency-check-secrets
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dependency-check-secrets
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: dependency-check-secrets
+                  key: MONGO_URI
+                  optional: true
+
+            # Configuration values from ConfigMap
+            - name: GITHUB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: dependency-check-config
+                  key: GITHUB_USER
+            - name: GITHUB_ORG
+              valueFrom:
+                configMapKeyRef:
+                  name: dependency-check-config
+                  key: GITHUB_ORG
+            - name: GITHUB_REPOS
+              valueFrom:
+                configMapKeyRef:
+                  name: dependency-check-config
+                  key: GITHUB_REPOS
+            - name: SEVERITY_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: dependency-check-config
+                  key: SEVERITY_THRESHOLD
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: dependency-check-config
+                  key: AWS_REGION
+            - name: AWS_SNS_TOPIC_ARN
+              valueFrom:
+                configMapKeyRef:
+                  name: dependency-check-config
+                  key: AWS_SNS_TOPIC_ARN
+            - name: PRESERVE_REPOS
+              valueFrom:
+                configMapKeyRef:
+                  name: dependency-check-config
+                  key: PRESERVE_REPOS
+            - name: FIX_BREAKING_CHANGES
+              valueFrom:
+                configMapKeyRef:
+                  name: dependency-check-config
+                  key: FIX_BREAKING_CHANGES
+            - name: MONGO_LOGS_COLLECTION
+              valueFrom:
+                configMapKeyRef:
+                  name: dependency-check-config
+                  key: MONGO_LOGS_COLLECTION
+            
+            # Internal persistent data directory path
+            - name: DATA_DIR
+              value: "/data"
+
+          volumeMounts:
+            - name: nvd-database-cache
+              mountPath: /data
+
+      volumes:
+        - name: nvd-database-cache
+          persistentVolumeClaim:
+            claimName: dependency-check-nvd-cache
