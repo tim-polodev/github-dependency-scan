@@ -15,5 +15,11 @@ data:
   AWS_REGION: "us-east-1"
   AWS_SNS_TOPIC_ARN: "<YOUR_AWS_SNS_TOPIC_ARN>" # e.g. arn:aws:sns:us-east-1:123456789012:MyTopic
   
+  # Whether to preserve and reuse cloned repository directories in the persistent volume
+  PRESERVE_REPOS: "true"
+
+  # Whether to allow breaking changes during npm audit remediation (runs 'npm audit fix --force')
+  FIX_BREAKING_CHANGES: "false"
+
   # Vulnerability Scan threshold (HIGH or CRITICAL recommended)
   SEVERITY_THRESHOLD: "HIGH"

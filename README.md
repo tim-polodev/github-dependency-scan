@@ -7,7 +7,9 @@ This service runs OWASP Dependency-Check daily on all your GitHub repositories, 
 * **Smart Database Caching**: Persists the NVD vulnerability database in a Kubernetes PersistentVolumeClaim (PVC). Instead of downloading ~2GB+ on every run (which triggers NVD rate limiting and is slow), it only fetches daily incremental updates.
 * **MongoDB Report Archiving**: Saves full JSON reports containing granular vulnerability findings, severity breakdowns, and metadata into a MongoDB collection (`scan_results`) automatically.
 * **Compact AWS SNS Alerts**: Rather than sending massive raw logs, the scanner aggregates findings and publishes a concise email digest showing the repository name, total CVE count, and severity breakdown (e.g., `1 CRITICAL, 3 HIGH`).
-* **Automated Remediation**: Automatically remediates `HIGH` or `CRITICAL` vulnerability findings using ecosystem tools (`npm audit fix` for Node.js, `pip-audit --fix` for Python). Note that this only applies **non-breaking upgrades**. If a dependency fix requires major semver-breaking changes, it is skipped to prevent breaking your build.
+* **Automated Remediation**: Automatically remediates `HIGH` or `CRITICAL` vulnerability findings using ecosystem tools (`npm audit fix` for Node.js, `pip-audit --fix` for Python). By default, this only applies **non-breaking upgrades**. However, you can configure it to fix **all npm audit issues including breaking changes** (via `npm audit fix --force`) and automatically create a pull request.
+* **Multi-Version Runtime Environments**: Supports dynamic Python (`3.8` to `3.12`) and Node.js versions (managed via NVM) in the scanner container. It reads `.python-version`, `.nvmrc`, or `.node-version` files per repository to execute audit and remediation tools inside exact matching runtimes.
+* **Repository Storage Persistence**: Optionally preserves cloned repository storage inside the Persistent Volume (under `/data/repos`). When enabled, subsequent runs will perform fast local updates (`git fetch` and reset) rather than cloning from scratch, saving network bandwidth and execution time.
 * **Subnet Overlap Bypass**: Bypasses Calico CNI packet drops or DNS timeouts in self-hosted bare metal clusters by specifying `dnsPolicy: None` and fallback public nameservers (`8.8.8.8`, `1.1.1.1`) directly inside the pod template.
 * **Automated Volume Permissions**: Includes a root-owned `initContainer` (`volume-permissions`) to execute `chown -R 1000:1000 /data` automatically, allowing the non-root scanner main container to read/write to physical cluster persistent storage without host-level privilege modifications.
 * **Kubernetes Native**: Runs as a daily non-root Kubernetes `CronJob` with strict resource guidelines.
@@ -90,6 +92,9 @@ data:
 * Set `GITHUB_USER` or `GITHUB_ORG` to fetch repositories automatically. Or specify `GITHUB_REPOS` with a comma-separated list of repos (e.g., `owner/repo-a,owner/repo-b`).
 * Modify `SEVERITY_THRESHOLD` (choices: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`). Only vulnerabilities matching or exceeding this level will trigger email alerts.
 * Set your `AWS_REGION` and `AWS_SNS_TOPIC_ARN`.
+* Enable or disable optional parameters:
+  * `PRESERVE_REPOS`: Set to `"true"` (recommended) to preserve cloned repositories inside the persistent volume (under `/data/repos`) to speed up subsequent scans.
+  * `FIX_BREAKING_CHANGES`: Set to `"true"` if you want the automated remediation agent to apply breaking changes when fixing NPM dependencies (`npm audit fix --force`) and push those changes in the PR.
 
 ### 3. Setup Persistent Volume (`k8s/pv.yaml`)
 * Replace `<YOUR_HOST_PATH_DIRECTORY>` with the directory path on your host node.
@@ -126,19 +131,30 @@ kubectl apply -f k8s/cronjob.yaml
 
 ## Step 4: Verification and Testing
 
-You can trigger an ad-hoc Kubernetes Job from the CronJob definition to run a scan immediately:
+You can trigger an ad-hoc Kubernetes Job using the provided manual job manifest or directly from the CronJob definition:
 
+### Option A: Using the Manual Job Manifest (Recommended)
+You can customize configuration options in `k8s/configmap.yaml` and trigger a run:
+```bash
+# Create the manual job
+kubectl apply -f k8s/manual-job.yaml
+```
+
+### Option B: Spawning from the CronJob Definition
+Alternatively, you can trigger a run directly from the scheduled CronJob:
 ```bash
 # Spawn a manual job from the CronJob definition
 kubectl create job --from=cronjob/dependency-scanner dependency-scanner-manual -n dependency-check
+```
 
+### Watching Logs and Cleaning Up
+Once the job is created, you can watch the scanner logs and clean up when complete:
+```bash
 # Watch the pod initialization and scan logs
 kubectl get pods -n dependency-check -w
 kubectl logs -f job/dependency-scanner-manual -n dependency-check -c scanner
-```
 
-Once the run is complete, clean up the manual test job:
-```bash
+# Once complete, clean up the manual job
 kubectl delete job dependency-scanner-manual -n dependency-check
 ```
 
@@ -163,6 +179,11 @@ The scanner will immediately detect the file deletion and resume scanning.
 ### Database Initialization
 * **First Run**: During the first execution, Dependency-Check will download and seed the entire NVD H2 database into the Persistent Volume. This takes about **5 to 15 minutes** depending on your bandwidth.
 * **Subsequent Runs**: Daily incremental updates typically complete in **under 2 minutes** per repository, making execution extremely fast.
+
+### Multi-Version Runtime Support (Remediation)
+Different repositories often target distinct language versions. To ensure remediation tools like `npm audit` and `pip-audit` execute successfully without runtime conflicts, the scanner container is equipped with environment tools:
+* **Node.js (NVM)**: Node Version Manager is pre-installed. The orchestrator checks each repository for a `.nvmrc` or `.node-version` file. If found, NVM dynamically installs and switches to that Node/npm version before executing audit fixes. The system defaults to Node `20.11.1`.
+* **Python (Deadsnakes)**: Pre-compiled binaries for Python `3.8`, `3.9`, `3.11`, and `3.12` (with `3.10` as system default) are installed in the image. The orchestrator checks each repository for a `.python-version` file, creates an isolated virtual environment (`venv`) using that specific interpreter, installs `pip-audit`, performs the remediation, and cleans up the virtual environment before committing.
 
 ---
 

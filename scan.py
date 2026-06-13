@@ -29,6 +29,24 @@ def get_env_var(name, default=None, required=False):
         sys.exit(1)
     return val
 
+def run_cmd(cmd, cwd=None, check=True):
+    res = subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False
+    )
+    if res.returncode != 0:
+        logger.warning(
+            f"Command failed: {' '.join(cmd)} (Exit Code: {res.returncode})\n"
+            f"Stdout: {res.stdout.strip() if res.stdout else ''}\n"
+            f"Stderr: {res.stderr.strip() if res.stderr else ''}"
+        )
+        if check:
+            raise subprocess.CalledProcessError(res.returncode, cmd, output=res.stdout, stderr=res.stderr)
+    return res
+
 # Configuration
 GITHUB_TOKEN = get_env_var("GITHUB_TOKEN", required=True)
 NVD_API_KEY = get_env_var("NVD_API_KEY")
@@ -39,6 +57,10 @@ SEVERITY_THRESHOLD = get_env_var("SEVERITY_THRESHOLD", "HIGH").upper()
 DATA_DIR = get_env_var("DATA_DIR", "/data")
 AWS_REGION = get_env_var("AWS_REGION", "us-east-1")
 AWS_SNS_TOPIC_ARN = get_env_var("AWS_SNS_TOPIC_ARN", required=True)
+
+# Storage & Remediation Options
+PRESERVE_REPOS = get_env_var("PRESERVE_REPOS", "false").lower() == "true"
+FIX_BREAKING_CHANGES = get_env_var("FIX_BREAKING_CHANGES", "false").lower() == "true"
 
 # MongoDB Configuration
 MONGO_URI = get_env_var("MONGO_URI")  # Optional: e.g., mongodb://host:27017
@@ -145,19 +167,42 @@ def scan_repository(repo):
     repo_name = repo['full_name']
     clone_url = get_auth_clone_url(repo)
     
-    # Create temp directory for cloning
-    temp_dir = tempfile.mkdtemp()
+    # Determine directory for cloning
+    is_temp_repo = not PRESERVE_REPOS
+    if PRESERVE_REPOS:
+        repos_base_dir = os.path.join(DATA_DIR, "repos")
+        temp_dir = os.path.join(repos_base_dir, repo_name)
+    else:
+        temp_dir = tempfile.mkdtemp()
+        
     report_dir = tempfile.mkdtemp()
+    default_branch = repo.get('default_branch', 'main')
     
     try:
-        logger.info(f"Cloning {repo_name}...")
-        # Shallow clone to minimize disk and network usage
-        subprocess.run(
-            ["git", "clone", "--depth", "1", clone_url, temp_dir],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
-        )
+        repo_dir_exists = os.path.exists(temp_dir) and os.path.exists(os.path.join(temp_dir, ".git"))
+        if PRESERVE_REPOS and repo_dir_exists:
+            logger.info(f"Using preserved repository directory for {repo_name}. Updating...")
+            try:
+                # Clean up any local changes/untracked files from previous runs
+                run_cmd(["git", "reset", "--hard"], cwd=temp_dir)
+                run_cmd(["git", "clean", "-fdx"], cwd=temp_dir)
+                # Checkout default branch
+                run_cmd(["git", "checkout", default_branch], cwd=temp_dir)
+                # Fetch latest commits
+                run_cmd(["git", "fetch", "origin", default_branch, "--depth", "1"], cwd=temp_dir)
+                # Reset to latest remote commit
+                run_cmd(["git", "reset", "--hard", f"origin/{default_branch}"], cwd=temp_dir)
+            except Exception as e:
+                logger.warning(f"Failed to update preserved repository for {repo_name}: {str(e)}. Re-cloning...")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                repo_dir_exists = False
+                
+        if not PRESERVE_REPOS or not repo_dir_exists:
+            logger.info(f"Cloning {repo_name}...")
+            if PRESERVE_REPOS:
+                os.makedirs(os.path.dirname(temp_dir), exist_ok=True)
+            # Shallow clone to minimize disk and network usage
+            run_cmd(["git", "clone", "--depth", "1", clone_url, temp_dir])
         
         logger.info(f"Running Dependency-Check on {repo_name}...")
         # Path to dependency-check CLI (we expect it in PATH, installed in docker image)
@@ -176,7 +221,7 @@ def scan_repository(repo):
             cmd.extend(["--nvdApiKey", NVD_API_KEY])
         
         # Run scan
-        subprocess.run(cmd, check=True)
+        run_cmd(cmd)
         
         report_file = os.path.join(report_dir, "dependency-check-report.json")
         if not os.path.exists(report_file):
@@ -206,7 +251,8 @@ def scan_repository(repo):
         return None
     finally:
         # Cleanup temp dirs
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        if is_temp_repo:
+            shutil.rmtree(temp_dir, ignore_errors=True)
         shutil.rmtree(report_dir, ignore_errors=True)
 
 def parse_report(repo_name, report_data):
@@ -304,6 +350,62 @@ def send_alert(results):
     except Exception as e:
         logger.error(f"Unexpected error publishing to AWS SNS: {str(e)}")
 
+def get_node_version(repo_dir):
+    """Detect Node.js version from .nvmrc or .node-version."""
+    nvmrc_path = os.path.join(repo_dir, ".nvmrc")
+    node_version_path = os.path.join(repo_dir, ".node-version")
+    
+    if os.path.exists(nvmrc_path):
+        try:
+            with open(nvmrc_path, 'r') as f:
+                version = f.read().strip()
+                if version:
+                    return version
+        except Exception:
+            pass
+            
+    if os.path.exists(node_version_path):
+        try:
+            with open(node_version_path, 'r') as f:
+                version = f.read().strip()
+                if version:
+                    return version
+        except Exception:
+            pass
+            
+    return None
+
+def run_npm_cmd_with_nvm(cmd_args, cwd, repo_name):
+    """Run an npm command, using nvm to select the correct Node.js version if specified."""
+    node_ver = get_node_version(cwd)
+    if node_ver:
+        logger.info(f"[{repo_name}] Detected Node.js version {node_ver} from config files. Using nvm...")
+        node_ver = node_ver.lstrip('v').strip()
+        nvm_cmd = [
+            "bash", "-c",
+            f"source $NVM_DIR/nvm.sh && nvm install {node_ver} && nvm use {node_ver} && {' '.join(cmd_args)}"
+        ]
+        return run_cmd(nvm_cmd, cwd=cwd, check=False)
+    else:
+        # Fall back to default Node.js
+        return run_cmd(cmd_args, cwd=cwd, check=False)
+
+def get_python_version(repo_dir):
+    """Detect Python version from .python-version."""
+    py_version_path = os.path.join(repo_dir, ".python-version")
+    if os.path.exists(py_version_path):
+        try:
+            with open(py_version_path, 'r') as f:
+                version = f.read().strip()
+                if version:
+                    parts = version.split('.')
+                    if len(parts) >= 2:
+                        return f"{parts[0]}.{parts[1]}"
+                    return version
+        except Exception:
+            pass
+    return None
+
 def remediate_and_create_pr(repo, temp_dir, report):
     """Run auto-remediation inside temp_dir and create a Pull Request if changes are made."""
     repo_name = repo['full_name']
@@ -313,43 +415,61 @@ def remediate_and_create_pr(repo, temp_dir, report):
     # Python Requirements Fix
     req_file = os.path.join(temp_dir, "requirements.txt")
     if os.path.exists(req_file):
-        logger.info(f"[{repo_name}] Found requirements.txt. Running pip-audit --fix...")
+        py_ver = get_python_version(temp_dir)
+        py_binary = sys.executable  # default fallback
+        if py_ver:
+            candidate_binary = f"python{py_ver}"
+            if shutil.which(candidate_binary):
+                py_binary = candidate_binary
+                logger.info(f"[{repo_name}] Using detected Python version {py_ver} ({py_binary}) for remediation")
+            else:
+                logger.warning(f"[{repo_name}] Detected Python version {py_ver} but {candidate_binary} is not installed. Falling back to default Python.")
+        
+        logger.info(f"[{repo_name}] Running pip-audit --fix inside virtual environment...")
         try:
-            # Run pip-audit to auto-remediate dependencies
-            subprocess.run(
-                [sys.executable, "-m", "pip_audit", "-r", "requirements.txt", "--fix"],
+            # Create a virtual environment using the selected python binary
+            venv_dir = os.path.join(temp_dir, ".scanner_venv")
+            run_cmd([py_binary, "-m", "venv", venv_dir], cwd=temp_dir)
+            
+            # Path to pip and pip-audit inside virtual environment
+            pip_path = os.path.join(venv_dir, "bin", "pip")
+            pip_audit_path = os.path.join(venv_dir, "bin", "pip-audit")
+            
+            # Install pip-audit in the venv
+            run_cmd([pip_path, "install", "--upgrade", "pip", "pip-audit"], cwd=temp_dir)
+            
+            # Run pip-audit to remediate requirements.txt
+            run_cmd(
+                [pip_audit_path, "-r", "requirements.txt", "--fix"],
                 cwd=temp_dir,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
                 check=False
             )
+            # Remove venv before git status/commit so we don't commit it
+            shutil.rmtree(venv_dir, ignore_errors=True)
         except Exception as e:
-            logger.error(f"[{repo_name}] Failed to run pip-audit: {str(e)}")
+            logger.error(f"[{repo_name}] Failed to run pip-audit remediation: {str(e)}")
+            shutil.rmtree(os.path.join(temp_dir, ".scanner_venv"), ignore_errors=True)
             
     # Node.js package.json Fix
     package_file = os.path.join(temp_dir, "package.json")
     if os.path.exists(package_file):
-        logger.info(f"[{repo_name}] Found package.json. Running npm audit fix...")
+        npm_cmd = ["npm", "audit", "fix"]
+        if FIX_BREAKING_CHANGES:
+            logger.info(f"[{repo_name}] Found package.json. Running npm audit fix --force...")
+            npm_cmd.append("--force")
+        else:
+            logger.info(f"[{repo_name}] Found package.json. Running npm audit fix...")
         try:
-            # Run npm audit fix
-            subprocess.run(
-                ["npm", "audit", "fix"],
-                cwd=temp_dir,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False
-            )
+            # Run npm audit fix using NVM wrapper
+            run_npm_cmd_with_nvm(npm_cmd, cwd=temp_dir, repo_name=repo_name)
         except Exception as e:
             logger.error(f"[{repo_name}] Failed to run npm audit fix: {str(e)}")
 
     # 2. Check if git status has any changes
     try:
-        status_res = subprocess.run(
+        status_res = run_cmd(
             ["git", "status", "--porcelain"],
-            cwd=temp_dir,
-            capture_output=True,
-            text=True,
-            check=True
+            cwd=temp_dir
         )
         if not status_res.stdout.strip():
             logger.info(f"[{repo_name}] No files were modified during remediation. Skipping branch push and PR creation.")
@@ -360,12 +480,9 @@ def remediate_and_create_pr(repo, temp_dir, report):
         # Get last commit SHA before checkout and commit
         last_commit_sha = None
         try:
-            sha_res = subprocess.run(
+            sha_res = run_cmd(
                 ["git", "rev-parse", "HEAD"],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                check=True
+                cwd=temp_dir
             )
             last_commit_sha = sha_res.stdout.strip()
         except Exception as e:
@@ -375,16 +492,16 @@ def remediate_and_create_pr(repo, temp_dir, report):
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         branch_name = f"dependency-check/auto-remediations-{timestamp}"
         
-        subprocess.run(["git", "config", "user.name", "Dependency-Check Bot"], cwd=temp_dir, check=True)
-        subprocess.run(["git", "config", "user.email", "dependency-check-bot@users.noreply.github.com"], cwd=temp_dir, check=True)
+        run_cmd(["git", "config", "user.name", "Dependency-Check Bot"], cwd=temp_dir)
+        run_cmd(["git", "config", "user.email", "dependency-check-bot@users.noreply.github.com"], cwd=temp_dir)
         
-        subprocess.run(["git", "checkout", "-b", branch_name], cwd=temp_dir, check=True)
-        subprocess.run(["git", "add", "."], cwd=temp_dir, check=True)
-        subprocess.run(["git", "commit", "-m", "security: auto-remediate high/critical dependencies"], cwd=temp_dir, check=True)
+        run_cmd(["git", "checkout", "-b", branch_name], cwd=temp_dir)
+        run_cmd(["git", "add", "."], cwd=temp_dir)
+        run_cmd(["git", "commit", "-m", "security: auto-remediate high/critical dependencies"], cwd=temp_dir)
         
         # 4. Push to remote
         logger.info(f"[{repo_name}] Pushing branch {branch_name} to remote...")
-        subprocess.run(["git", "push", "origin", branch_name], cwd=temp_dir, check=True)
+        run_cmd(["git", "push", "origin", branch_name], cwd=temp_dir)
         
         # 5. Create Pull Request via GitHub API
         headers = {
@@ -403,12 +520,13 @@ def remediate_and_create_pr(repo, temp_dir, report):
                 )
         findings_body = "\n".join(findings_list)
         
+        npm_fix_cmd = "npm audit fix --force" if FIX_BREAKING_CHANGES else "npm audit fix"
         pr_body = (
             f"This is an automated pull request to remediate HIGH/CRITICAL dependency vulnerabilities "
             f"found during the daily dependency scan.\n\n"
             f"### Discovered Vulnerabilities:\n{findings_body}\n\n"
             f"### Remediation Actions Applied:\n"
-            f"- Checked for and applied ecosystem security updates (e.g. `pip-audit --fix` or `npm audit fix`).\n\n"
+            f"- Checked for and applied ecosystem security updates (e.g. `pip-audit --fix` or `{npm_fix_cmd}`).\n\n"
             f"Please review and merge these changes."
         )
         
