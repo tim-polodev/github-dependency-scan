@@ -38,8 +38,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip3 install --no-cache-dir -r /app/requirements.txt
 
 # Setup application files
-COPY scan.py /app/scan.py
-RUN chmod +x /app/scan.py
+COPY scanner/ /app/scanner/
 
 # Create a non-root system user and prepare writable data directory
 RUN useradd -u 1000 -m -s /bin/bash scanner \
@@ -63,4 +62,4 @@ ENV PATH=/home/scanner/.nvm/versions/node/v20.11.1/bin:$PATH
 ENV DATA_DIR=/data
 
 # Start the python scanner orchestrator
-ENTRYPOINT ["python3", "scan.py"]
+ENTRYPOINT ["python3", "-m", "scanner"]
